@@ -26,8 +26,13 @@ def inline(*rows: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     )
 
 
-def after_text() -> InlineKeyboardMarkup:
-    return inline([("➕ Слова из текста в словарь", "text:words")], [("📖 Ещё текст", "text:new")])
+def text_pages(current: int, total: int) -> InlineKeyboardMarkup:
+    row = []
+    if current > 0:
+        row.append(("⬅️", f"tp:{current - 1}"))
+    if current < total - 1:
+        row.append(("➡️", f"tp:{current + 1}"))
+    return inline(row, [("➕ Слова из текста в словарь", f"text:words:{current}")], [("📖 Ещё текст", "text:more")])
 
 
 def candidates(words: list[dict]) -> InlineKeyboardMarkup:

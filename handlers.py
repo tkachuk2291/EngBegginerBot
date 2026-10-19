@@ -78,6 +78,14 @@ async def finish(status: Message, body: str, markup=None) -> None:
         await status.answer(part, reply_markup=markup if i == len(parts) else None)
 
 
+def text_page(storage: Storage, index: int) -> str:
+    item = storage.texts[index]
+    return (
+        f"📖 <b>{html.escape(item['title'])}</b>  ·  {index + 1}/{len(storage.texts)}\n\n{html.escape(item['english'])}\n\n"
+        f"🇷🇺 <b>Перевод</b>\n<blockquote expandable>{html.escape(item['russian'])}</blockquote>"
+    )
+
+
 def homework_text(storage: Storage) -> str:
     hw = storage.homework
     status = "✅ сдано" if hw["done"] else "⏳ ждёт ответа"
@@ -103,21 +111,27 @@ def build_router(admin_id: int) -> Router:
     router.message.filter(F.from_user.id == admin_id)
     router.callback_query.filter(F.from_user.id == admin_id)
 
-    async def new_text(message: Message, storage: Storage, tutor: Tutor, topic: str = "") -> None:
-        status = await progress(message, "⏳ Пишу текст...")
+    async def new_text(message: Message, storage: Storage, tutor: Tutor, topic: str = "", edit: bool = False) -> None:
+        if edit:
+            status = message
+            await status.edit_text("⏳ Пишу текст...")
+        else:
+            status = await progress(message, "⏳ Пишу текст...")
         try:
             story = await tutor.story(storage.level, topic)
         except TutorError:
-            await status.edit_text(BUSY)
+            if edit and storage.texts:
+                await show_text_page(status, storage, len(storage.texts) - 1)
+                await status.answer(BUSY)
+            else:
+                await status.edit_text(BUSY)
             return
-        storage.set_text(story.english)
+        index = storage.add_text(story.title, story.english, story.russian)
         log.info("Story sent", extra={"topic": topic, "english_level": storage.level})
-        await finish(
-            status,
-            f"📖 <b>{html.escape(story.title)}</b>\n\n{html.escape(story.english)}\n\n"
-            f"🇷🇺 <b>Перевод</b>\n<blockquote expandable>{html.escape(story.russian)}</blockquote>",
-            kb.after_text(),
-        )
+        await show_text_page(status, storage, index)
+
+    async def show_text_page(message: Message, storage: Storage, index: int) -> None:
+        await finish(message, text_page(storage, index), kb.text_pages(index, len(storage.texts)))
 
     async def show_dictionary(message: Message, storage: Storage) -> None:
         words = storage.sorted_words()
@@ -323,15 +337,32 @@ def build_router(admin_id: int) -> Router:
         await call.answer()
         await new_text(call.message, storage, tutor)
 
-    @router.callback_query(F.data == "text:words")
+    @router.callback_query(F.data == "text:more")
+    async def cb_text_more(call: CallbackQuery, storage: Storage, tutor: Tutor) -> None:
+        await call.answer("Пишу текст…")
+        await new_text(call.message, storage, tutor, edit=True)
+
+    @router.callback_query(F.data.startswith("tp:"))
+    async def cb_text_page(call: CallbackQuery, storage: Storage) -> None:
+        index = int(call.data.split(":")[1])
+        if index >= len(storage.texts):
+            await call.answer("Этот текст уже не сохранён", show_alert=True)
+            return
+        await call.answer()
+        await show_text_page(call.message, storage, index)
+
+    @router.callback_query(F.data.startswith("text:words"))
     async def cb_text_words(call: CallbackQuery, storage: Storage, tutor: Tutor) -> None:
         await call.answer("Выбираю слова…")
-        if not storage.data["last_text"]:
+        parts = call.data.split(":")
+        index = int(parts[2]) if len(parts) > 2 else -1
+        source = storage.texts[index]["english"] if storage.texts and index < len(storage.texts) else storage.data["last_text"]
+        if not source:
             await call.message.answer("Сначала попроси новый текст.")
             return
         status = await progress(call.message, "⏳ Выбираю слова...")
         try:
-            words = await tutor.extract_words(storage.data["last_text"], storage.level)
+            words = await tutor.extract_words(source, storage.level)
         except TutorError:
             await status.edit_text(BUSY)
             return

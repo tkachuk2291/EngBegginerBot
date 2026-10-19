@@ -8,6 +8,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 LEVELS = ("A1", "A2", "B1", "B2", "C1")
+TEXTS_LIMIT = 100
 
 
 class Storage:
@@ -18,6 +19,7 @@ class Storage:
             "words": [],
             "homework": None,
             "last_text": "",
+            "texts": [],
             "candidates": [],
             "reminder": {"time": reminder_time, "enabled": True, "last": ""},
         }
@@ -102,10 +104,17 @@ class Storage:
         self.reminder.update(values)
         self.save()
 
-    def set_text(self, text: str) -> None:
-        self.data["last_text"] = text
+    @property
+    def texts(self) -> list[dict]:
+        return self.data["texts"]
+
+    def add_text(self, title: str, english: str, russian: str) -> int:
+        self.texts.append({"title": title, "english": english, "russian": russian})
+        del self.texts[:-TEXTS_LIMIT]
+        self.data["last_text"] = english
         self.data["candidates"] = []
         self.save()
+        return len(self.texts) - 1
 
     def set_candidates(self, words: list[dict]) -> None:
         self.data["candidates"] = words
