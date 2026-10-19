@@ -1,9 +1,10 @@
+import html
 import logging
 import re
 from dataclasses import dataclass, field
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramNetworkError
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import CallbackQuery, ErrorEvent, Message
 
@@ -58,14 +59,33 @@ async def answer(message: Message, text: str, markup=None) -> None:
         await message.answer(part, reply_markup=markup if i == len(parts) - 1 else None)
 
 
+async def progress(message: Message, text: str) -> Message:
+    if message.from_user and not message.from_user.is_bot:
+        return await message.reply(text)
+    return await message.answer(text)
+
+
+async def finish(status: Message, body: str, markup=None) -> None:
+    if len(body) <= CHUNK:
+        try:
+            await status.edit_text(body, parse_mode="HTML", reply_markup=markup)
+            return
+        except TelegramBadRequest as e:
+            log.warning("HTML edit failed", extra={"error": e.message})
+    parts = chunks(html.unescape(re.sub(r"<[^>]+>", "", body)))
+    await status.edit_text(parts[0], reply_markup=markup if len(parts) == 1 else None)
+    for i, part in enumerate(parts[1:], 2):
+        await status.answer(part, reply_markup=markup if i == len(parts) else None)
+
+
 def homework_text(storage: Storage) -> str:
     hw = storage.homework
     status = "✅ сдано" if hw["done"] else "⏳ ждёт ответа"
-    text = f"📝 Домашнее задание от {hw['given']} ({status})\n\n{hw['task']}"
+    text = f"📝 <b>Домашнее задание от {hw['given']}</b> ({status})\n\n{html.escape(hw['task'])}"
     if hw["done"] and hw["feedback"]:
-        text += f"\n\nПроверка:\n{hw['feedback']}"
+        text += f"\n\n✍️ <b>Проверка</b>\n<blockquote expandable>{html.escape(hw['feedback'])}</blockquote>"
     elif not hw["done"]:
-        text += "\n\nКогда будешь готов — нажми «Сдать» и пришли ответ одним сообщением."
+        text += "\n\n<i>Когда будешь готов — нажми «Сдать» и пришли ответ одним сообщением.</i>"
     return text
 
 
@@ -84,16 +104,20 @@ def build_router(admin_id: int) -> Router:
     router.callback_query.filter(F.from_user.id == admin_id)
 
     async def new_text(message: Message, storage: Storage, tutor: Tutor, topic: str = "") -> None:
-        await message.bot.send_chat_action(message.chat.id, "typing")
+        status = await progress(message, "⏳ Пишу текст...")
         try:
             story = await tutor.story(storage.level, topic)
         except TutorError:
-            await message.answer(BUSY)
+            await status.edit_text(BUSY)
             return
         storage.set_text(story.english)
         log.info("Story sent", extra={"topic": topic, "english_level": storage.level})
-        await answer(message, f"📖 {story.title}\n\n{story.english}")
-        await answer(message, f"🇷🇺 Перевод:\n\n{story.russian}", kb.after_text())
+        await finish(
+            status,
+            f"📖 <b>{html.escape(story.title)}</b>\n\n{html.escape(story.english)}\n\n"
+            f"🇷🇺 <b>Перевод</b>\n<blockquote expandable>{html.escape(story.russian)}</blockquote>",
+            kb.after_text(),
+        )
 
     async def show_dictionary(message: Message, storage: Storage) -> None:
         words = storage.sorted_words()
@@ -140,16 +164,18 @@ def build_router(admin_id: int) -> Router:
 
     async def show_homework(message: Message, storage: Storage, tutor: Tutor, fresh: bool = False) -> None:
         if fresh or not storage.homework:
-            await message.bot.send_chat_action(message.chat.id, "typing")
+            status = await progress(message, "⏳ Составляю задание...")
             words = [w["en"] for w in storage.sorted_words()][-15:]
             try:
                 task = await tutor.homework(storage.level, words)
             except TutorError:
-                await message.answer(BUSY)
+                await status.edit_text(BUSY)
                 return
             storage.set_homework(task)
             log.info("Homework given", extra={"english_level": storage.level})
-        await answer(message, homework_text(storage), kb.homework(storage.homework["done"]))
+        else:
+            status = await progress(message, "📝")
+        await finish(status, homework_text(storage), kb.homework(storage.homework["done"]))
 
     @router.message(CommandStart())
     @router.message(Command("help"))
@@ -263,30 +289,30 @@ def build_router(admin_id: int) -> Router:
                 await message.answer(f"❌ Правильно: {verbs.format_verb(verb)}", reply_markup=kb.verb_next())
             return
         if mode == "homework" and storage.homework:
-            await message.bot.send_chat_action(message.chat.id, "typing")
+            status = await progress(message, "⏳ Проверяю...")
             try:
                 feedback = await tutor.check_homework(storage.level, storage.homework["task"], message.text)
             except TutorError:
                 session.mode = "homework"
-                await message.answer(BUSY + "\nПришли ответ ещё раз чуть позже.")
+                await status.edit_text(BUSY + "\nПришли ответ ещё раз чуть позже.")
                 return
             storage.finish_homework(feedback)
             log.info("Homework checked")
-            await answer(message, f"📝 Проверка:\n\n{feedback}", kb.homework(True))
+            await finish(status, f"✍️ <b>Проверка</b>\n\n{html.escape(feedback)}", kb.homework(True))
             return
         match = NEW_TEXT_RE.match(message.text.strip())
         if match:
             await new_text(message, storage, tutor, match.group(2).strip())
             return
-        await message.bot.send_chat_action(message.chat.id, "typing")
+        status = await progress(message, "⏳ Думаю...")
         try:
             reply = await tutor.chat(session.history, message.text, storage.level)
         except TutorError:
-            await message.answer(BUSY)
+            await status.edit_text(BUSY)
             return
         session.history += [("user", message.text), ("model", reply)]
         del session.history[:-HISTORY_LIMIT]
-        await answer(message, reply)
+        await finish(status, html.escape(reply))
 
     @router.message()
     async def other(message: Message) -> None:
@@ -303,13 +329,14 @@ def build_router(admin_id: int) -> Router:
         if not storage.data["last_text"]:
             await call.message.answer("Сначала попроси новый текст.")
             return
+        status = await progress(call.message, "⏳ Выбираю слова...")
         try:
             words = await tutor.extract_words(storage.data["last_text"], storage.level)
         except TutorError:
-            await call.message.answer(BUSY)
+            await status.edit_text(BUSY)
             return
         storage.set_candidates([w.model_dump() for w in words])
-        await call.message.answer("Какие слова добавить в словарь?", reply_markup=kb.candidates(storage.data["candidates"]))
+        await status.edit_text("Какие слова добавить в словарь?", reply_markup=kb.candidates(storage.data["candidates"]))
 
     @router.callback_query(F.data.startswith("add:"))
     async def cb_add(call: CallbackQuery, storage: Storage) -> None:
