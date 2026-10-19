@@ -1,0 +1,22 @@
+services:
+  bot:
+    build: .
+    image: eng-begginer-bot:latest
+    container_name: eng-begginer-bot
+    restart: unless-stopped
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN}
+      ADMIN_ID: ${ADMIN_ID}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      TZ: ${TZ}
+      REMINDER_TIME: ${REMINDER_TIME}
+    volumes:
+      - eng-data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  eng-data:
